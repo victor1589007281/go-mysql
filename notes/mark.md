@@ -7,3 +7,8 @@
 4. 发送COM_BINLOG_DUMP_GTID/COM_BINLOG_DUMP command packet给主库，指定开始的binlog位置或者已经获得的GTID集合
 5. 持续监听订阅来自主库的binlog event，并解析成对应的数据,持续输出到管道。订阅过程中，需要根据前面的半同步开启状态决定是否发送ACK给主库
 6. 消费管道的数据
+## 2. serverless实现猜测
+https://cloud.tencent.com/document/product/1003/81819
+1. 随机数A/B：使用c.salt.用于密码加密
+2. 保留字：使用c.reserved.用于保留字段，用于区分客户端类型（内部还是用户）
+3. server层的改动：随机数B+保留字，用于代理客户端的鉴权；然后采用随机数A对用户密码进行鉴权
