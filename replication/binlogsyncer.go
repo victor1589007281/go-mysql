@@ -670,45 +670,60 @@ func (b *BinlogSyncer) localHostname() string {
 	return h[:255]
 }
 
+// writeRegisterSlaveCommand 向主库发送注册从库的命令
 func (b *BinlogSyncer) writeRegisterSlaveCommand() error {
+	// 重置序列号
 	b.c.ResetSequence()
 
+	// 获取本地主机名
 	hostname := b.localHostname()
 
 	// This should be the name of slave host not the host we are connecting to.
+	// 创建数据包，包含固定长度和可变长度字段
 	data := make([]byte, 4+1+4+1+len(hostname)+1+len(b.cfg.User)+1+2+4+4)
 	pos := 4
 
+	// 设置命令类型为注册从库
 	data[pos] = mysql.COM_REGISTER_SLAVE
 	pos++
 
+	// 写入服务器ID
 	binary.LittleEndian.PutUint32(data[pos:], b.cfg.ServerID)
 	pos += 4
 
 	// This should be the name of slave hostname not the host we are connecting to.
+	// 写入主机名长度
 	data[pos] = uint8(len(hostname))
 	pos++
+	// 复制主机名到数据包
 	n := copy(data[pos:], hostname)
 	pos += n
 
+	// 写入用户名长度
 	data[pos] = uint8(len(b.cfg.User))
 	pos++
+	// 复制用户名到数据包
 	n = copy(data[pos:], b.cfg.User)
 	pos += n
 
+	// 写入密码长度（这里为0，表示无密码）
 	data[pos] = uint8(0)
 	pos++
 
+	// 写入端口号
 	binary.LittleEndian.PutUint16(data[pos:], b.cfg.Port)
 	pos += 2
 
 	// replication rank, not used
+	// 写入复制等级（未使用）
 	binary.LittleEndian.PutUint32(data[pos:], 0)
 	pos += 4
 
 	// master ID, 0 is OK
+	// 写入主库ID（0表示未指定）
 	binary.LittleEndian.PutUint32(data[pos:], 0)
 
+	// 发送数据包
 	return b.c.WritePacket(data)
 }
 

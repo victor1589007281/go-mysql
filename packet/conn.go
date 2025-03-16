@@ -58,22 +58,34 @@ func NewConn(conn net.Conn) *Conn {
 	return NewBufferedConn(conn, 65536) // 64kb
 }
 
+// NewBufferedConn 创建一个带缓冲区的连接
 func NewBufferedConn(conn net.Conn, bufferSize int) *Conn {
+	// 创建一个新的Conn对象
 	c := new(Conn)
+	// 设置底层网络连接
 	c.Conn = conn
 
+	// 创建带缓冲区的Reader，使用指定大小
 	c.br = bufio.NewReaderSize(c, bufferSize)
+	// 设置默认的reader为带缓冲区的reader
 	c.reader = c.br
 
+	// 创建默认大小的copyN缓冲区
 	c.copyNBuf = make([]byte, DefaultBufferSize)
 
+	// 返回配置好的连接对象
 	return c
 }
 
+// NewConnWithTimeout 创建一个带超时设置的连接
 func NewConnWithTimeout(conn net.Conn, readTimeout, writeTimeout time.Duration, bufferSize int) *Conn {
+	// 创建一个带缓冲的连接
 	c := NewBufferedConn(conn, bufferSize)
+	// 设置读取超时时间
 	c.readTimeout = readTimeout
+	// 设置写入超时时间
 	c.writeTimeout = writeTimeout
+	// 返回配置好的连接对象
 	return c
 }
 
@@ -515,28 +527,39 @@ func (c *Conn) WriteEncryptedPassword(password string, seed []byte, pub *rsa.Pub
 }
 
 // WriteAuthSwitchPacket see https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_switch_response.html
+// 写入认证切换包，参考MySQL协议文档
 func (c *Conn) WriteAuthSwitchPacket(authData []byte, addNUL bool) error {
+	// 计算包长度（4字节头部 + 认证数据长度）
 	pktLen := 4 + len(authData)
+	// 如果需要添加NUL终止符，增加长度
 	if addNUL {
 		pktLen++
 	}
+	// 创建数据缓冲区
 	data := make([]byte, pktLen)
 
 	// Add the auth data [EOF]
+	// 添加认证数据 [EOF]
 	copy(data[4:], authData)
+	// 如果需要，添加NUL终止符
 	if addNUL {
 		data[pktLen-1] = 0x00
 	}
 
+	// 写入数据包并返回结果
 	return errors.Wrap(c.WritePacket(data), "WritePacket failed")
 }
 
+// ResetSequence 重置序列号
 func (c *Conn) ResetSequence() {
 	c.Sequence = 0
 }
 
+// Close 关闭连接
 func (c *Conn) Close() error {
+	// 重置序列号
 	c.Sequence = 0
+	// 如果连接存在，关闭连接
 	if c.Conn != nil {
 		return errors.Wrap(c.Conn.Close(), "Conn.Close failed")
 	}

@@ -103,80 +103,108 @@ func ConnectWithContext(ctx context.Context, addr, user, password, dbName string
 type Dialer func(ctx context.Context, network, address string) (net.Conn, error)
 
 // ConnectWithDialer to a MySQL server using the given Dialer.
+// 使用指定的Dialer连接到MySQL服务器
 func ConnectWithDialer(ctx context.Context, network, addr, user, password, dbName string, dialer Dialer, options ...Option) (*Conn, error) {
+	// 创建新的Conn实例
 	c := new(Conn)
 
+	// 初始化includeLine为-1
 	c.includeLine = -1
+	// 设置默认缓冲区大小
 	c.BufferSize = defaultBufferSize
+	// 初始化连接属性
 	c.attributes = map[string]string{
-		"_client_name":     "go-mysql",
-		"_os":              runtime.GOOS,
-		"_platform":        runtime.GOARCH,
-		"_runtime_version": runtime.Version(),
+		"_client_name":     "go-mysql",        // 客户端名称
+		"_os":              runtime.GOOS,      // 操作系统
+		"_platform":        runtime.GOARCH,    // 平台架构
+		"_runtime_version": runtime.Version(), // Go运行时版本
 	}
+	// 读取构建信息
 	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		// 遍历依赖项
 		for _, bi := range buildInfo.Deps {
+			// 查找go-mysql依赖
 			if bi.Path == "github.com/go-mysql-org/go-mysql" {
+				// 设置客户端版本
 				c.attributes["_client_version"] = bi.Version
 				break
 			}
 		}
 	}
 
+	// 如果未指定网络协议，则根据地址自动判断
 	if network == "" {
 		network = getNetProto(addr)
 	}
 
 	var err error
+	// 使用dialer建立连接
 	conn, err := dialer(ctx, network, addr)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
+	// 设置连接的用户名
 	c.user = user
+	// 设置连接的密码
 	c.password = password
+	// 设置连接的数据库名称
 	c.db = dbName
+	// 设置网络协议
 	c.proto = network
 
+	// 使用默认字符集，utf-8
 	// use default charset here, utf-8
 	c.charset = mysql.DEFAULT_CHARSET
 
+	// 应用配置选项
 	// Apply configuration functions.
 	for _, option := range options {
 		if err := option(c); err != nil {
+			// 如果配置无效，必须关闭连接
 			// must close the connection in the event the provided configuration is not valid
 			_ = conn.Close()
 			return nil, err
 		}
 	}
 
+	// 创建带超时的连接
 	c.Conn = packet.NewConnWithTimeout(conn, c.ReadTimeout, c.WriteTimeout, c.BufferSize)
+	// 如果配置了TLS
 	if c.tlsConfig != nil {
 		seq := c.Conn.Sequence
+		// 创建TLS连接
 		c.Conn = packet.NewTLSConnWithTimeout(conn, c.ReadTimeout, c.WriteTimeout)
+		// 保持序列号一致
 		c.Conn.Sequence = seq
 	}
 
+	// 执行握手协议
 	if err = c.handshake(); err != nil {
+		// 如果握手失败，handshake()会关闭连接
 		// in the event of an error c.handshake() will close the connection
 		return nil, errors.Trace(err)
 	}
 
+	// 处理压缩设置
 	if c.ccaps&mysql.CLIENT_COMPRESS > 0 {
 		c.Conn.Compression = mysql.MYSQL_COMPRESS_ZLIB
 	} else if c.ccaps&mysql.CLIENT_ZSTD_COMPRESSION_ALGORITHM > 0 {
 		c.Conn.Compression = mysql.MYSQL_COMPRESS_ZSTD
 	}
 
+	// 如果设置了ID大于255的字符集
 	// if a collation was set with a ID of > 255, then we need to call SET NAMES ...
 	// since the auth handshake response only support collations with 1-byte ids
 	if len(c.collation) != 0 {
+		// 获取字符集信息
 		collation, err := charset.GetCollationByName(c.collation)
 		if err != nil {
 			c.Close()
 			return nil, errors.Trace(fmt.Errorf("invalid collation name %s", c.collation))
 		}
 
+		// 如果字符集ID大于255，需要执行SET NAMES命令
 		if collation.ID > 255 {
 			if _, err := c.exec(fmt.Sprintf("SET NAMES %s COLLATE %s", c.charset, c.collation)); err != nil {
 				c.Close()
@@ -188,24 +216,35 @@ func ConnectWithDialer(ctx context.Context, network, addr, user, password, dbNam
 	return c, nil
 }
 
+// handshake 执行MySQL连接握手协议
 func (c *Conn) handshake() error {
+	// 定义错误变量
 	var err error
+	// 读取服务器初始握手信息
 	if err = c.readInitialHandshake(); err != nil {
+		// 如果读取失败，关闭连接
 		c.Close()
+		// 返回带有堆栈信息的错误
 		return errors.Trace(fmt.Errorf("readInitialHandshake: %w", err))
 	}
 
+	// 发送客户端认证握手信息
 	if err := c.writeAuthHandshake(); err != nil {
+		// 如果发送失败，关闭连接
 		c.Close()
-
+		// 返回带有堆栈信息的错误
 		return errors.Trace(fmt.Errorf("writeAuthHandshake: %w", err))
 	}
 
+	// 处理认证结果
 	if err := c.handleAuthResult(); err != nil {
+		// 如果认证失败，关闭连接
 		c.Close()
+		// 返回带有堆栈信息的错误
 		return errors.Trace(fmt.Errorf("handleAuthResult: %w", err))
 	}
 
+	// 握手成功，返回nil
 	return nil
 }
 
@@ -507,7 +546,9 @@ func (c *Conn) HandleErrorPacket(data []byte) error {
 	return c.handleErrorPacket(data)
 }
 
+// ReadOKPacket 读取并返回一个OK数据包
 func (c *Conn) ReadOKPacket() (*mysql.Result, error) {
+	// 调用内部readOK方法读取OK数据包
 	return c.readOK()
 }
 
