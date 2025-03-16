@@ -222,34 +222,50 @@ func (p *BinlogParser) SetTableMapOptionalMetaDecodeFunc(tableMapOptionalMetaDec
 	p.tableMapOptionalMetaDecodeFunc = tableMapOptionalMetaDecondeFunc
 }
 
+// parseHeader 解析二进制日志事件头
 func (p *BinlogParser) parseHeader(data []byte) (*EventHeader, error) {
+	// 创建新的事件头对象
 	h := new(EventHeader)
+
+	// 解码二进制数据到事件头结构
 	err := h.Decode(data)
 	if err != nil {
+		// 如果解码失败，返回错误
 		return nil, err
 	}
 
+	// 返回解析后的事件头对象
 	return h, nil
 }
 
+// parseEvent 根据事件头和数据解析具体的事件
 func (p *BinlogParser) parseEvent(h *EventHeader, data []byte, rawData []byte) (Event, error) {
+	// 定义事件接口变量
 	var e Event
 
+	// 如果是格式描述事件
 	if h.EventType == FORMAT_DESCRIPTION_EVENT {
+		// 初始化格式描述事件
 		p.format = &FormatDescriptionEvent{}
+		// 将事件赋值给e
 		e = p.format
 	} else {
+		// 如果格式描述事件已存在且使用CRC32校验
 		if p.format != nil && p.format.ChecksumAlgorithm == BINLOG_CHECKSUM_ALG_CRC32 {
+			// 验证CRC32校验和
 			err := p.verifyCrc32Checksum(rawData)
 			if err != nil {
 				return nil, err
 			}
+			// 去除校验和部分的数据
 			data = data[0 : len(data)-BinlogChecksumLength]
 		}
 
+		// 如果是ROTATE事件
 		if h.EventType == ROTATE_EVENT {
 			e = &RotateEvent{}
 		} else if !p.rawMode {
+			// 根据事件类型创建对应的事件对象
 			switch h.EventType {
 			case QUERY_EVENT:
 				e = &QueryEvent{}
@@ -321,27 +337,35 @@ func (p *BinlogParser) parseEvent(h *EventHeader, data []byte, rawData []byte) (
 		}
 	}
 
+	// 解析事件数据
 	var err error
 	if re, ok := e.(*RowsEvent); ok && p.rowsEventDecodeFunc != nil {
+		// 如果有自定义的行事件解码函数，则使用它
 		err = p.rowsEventDecodeFunc(re, data)
 	} else {
+		// 否则使用默认的解码方法
 		err = e.Decode(data)
 	}
 	if err != nil {
+		// 如果解码失败，返回错误信息
 		return nil, &EventError{h, err.Error(), data}
 	}
 
+	// 如果是表映射事件，缓存表信息
 	if te, ok := e.(*TableMapEvent); ok {
 		p.tables[te.TableID] = te
 	}
 
+	// 如果是行事件并且设置了语句结束标志
 	if re, ok := e.(*RowsEvent); ok {
 		if (re.Flags & RowsEventStmtEndFlag) > 0 {
+			// 清空缓存的表映射信息
 			// Refer https://github.com/alibaba/canal/blob/38cc81b7dab29b51371096fb6763ca3a8432ffee/dbsync/src/main/java/com/taobao/tddl/dbsync/binlog/event/RowsLogEvent.java#L176
 			p.tables = make(map[uint64]*TableMapEvent)
 		}
 	}
 
+	// 返回解析后的事件对象
 	return e, nil
 }
 
@@ -351,26 +375,36 @@ func (p *BinlogParser) parseEvent(h *EventHeader, data []byte, rawData []byte) (
 // into the parser for this to work properly on any given event.
 // Passing a new FORMAT_DESCRIPTION_EVENT into the parser will replace
 // an existing one.
+// Parse: 给定二进制日志事件的字节数据，返回解码后的事件
+// 除了FORMAT_DESCRIPTION_EVENT事件类型外，解析器必须事先接收过FORMAT_DESCRIPTION_EVENT
+// 才能正确处理任何给定的事件。向解析器传递新的FORMAT_DESCRIPTION_EVENT将替换现有的
 func (p *BinlogParser) Parse(data []byte) (*BinlogEvent, error) {
+	// 保存原始数据
 	rawData := data
 
+	// 解析事件头
 	h, err := p.parseHeader(data)
 	if err != nil {
 		return nil, err
 	}
 
+	// 跳过事件头，获取事件体数据
 	data = data[EventHeaderSize:]
+	// 计算事件体长度
 	eventLen := int(h.EventSize) - EventHeaderSize
 
+	// 验证数据长度是否匹配
 	if len(data) != eventLen {
 		return nil, fmt.Errorf("invalid data size %d in event %s, less event length %d", len(data), h.EventType, eventLen)
 	}
 
+	// 解析事件体
 	e, err := p.parseEvent(h, data, rawData)
 	if err != nil {
 		return nil, err
 	}
 
+	// 返回完整的BinlogEvent结构
 	return &BinlogEvent{RawData: rawData, Header: h, Event: e}, nil
 }
 

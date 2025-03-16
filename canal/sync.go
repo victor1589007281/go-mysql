@@ -13,42 +13,63 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
+// startSyncer 启动binlog同步器
 func (c *Canal) startSyncer() (*replication.BinlogStreamer, error) {
+	// 获取主库的GTID集合
 	gset := c.master.GTIDSet()
+	// 如果GTID集合为空或为空字符串
 	if gset == nil || gset.String() == "" {
+		// 获取当前binlog位置
 		pos := c.master.Position()
+		// 从指定位置开始同步
 		s, err := c.syncer.StartSync(pos)
 		if err != nil {
+			// 返回错误信息
 			return nil, errors.Errorf("start sync replication at binlog %v error %v", pos, err)
 		}
+		// 记录开始同步的日志信息
 		c.cfg.Logger.Info("start sync binlog at binlog file", slog.Any("pos", pos))
+		// 返回binlog流
 		return s, nil
 	} else {
+		// 克隆GTID集合
 		gsetClone := gset.Clone()
+		// 从指定GTID集合开始同步
 		s, err := c.syncer.StartSyncGTID(gset)
 		if err != nil {
+			// 返回错误信息
 			return nil, errors.Errorf("start sync replication at GTID set %v error %v", gset, err)
 		}
+		// 记录开始同步的日志信息
 		c.cfg.Logger.Info("start sync binlog at GTID set", slog.Any("gset", gsetClone))
+		// 返回binlog流
 		return s, nil
 	}
 }
 
+// runSyncBinlog 运行binlog同步
 func (c *Canal) runSyncBinlog() error {
+	// 启动同步器
 	s, err := c.startSyncer()
 	if err != nil {
+		// 如果启动失败返回错误
 		return err
 	}
 
+	// 持续循环处理binlog事件
 	for {
+		// 获取下一个binlog事件
 		ev, err := s.GetEvent(c.ctx)
 		if err != nil {
+			// 如果获取事件失败返回错误
 			return errors.Trace(err)
 		}
 
 		// Update the delay between the Canal and the Master before the handler hooks are called
+		// 在调用处理程序钩子之前更新Canal和Master之间的延迟
 		c.updateReplicationDelay(ev)
 
+		// 根据事件类型进行处理
 		switch e := ev.Event.(type) {
 		case *replication.RotateEvent:
 			// If the timestamp equals zero, the received rotate event is a fake rotate event
@@ -56,52 +77,72 @@ func (c *Canal) runSyncBinlog() error {
 			// ignored.
 			// See https://github.com/mysql/mysql-server/blob/8e797a5d6eb3a87f16498edcb7261a75897babae/sql/rpl_binlog_sender.h#L235
 			// and https://github.com/mysql/mysql-server/blob/8cc757da3d87bf4a1f07dcfb2d3c96fed3806870/sql/rpl_binlog_sender.cc#L899
+			// 如果时间戳为0，表示这是一个假的rotate事件
 			if ev.Header.Timestamp == 0 {
+				// 获取下一个binlog文件名
 				fakeRotateLogName := string(e.NextLogName)
+				// 记录收到假rotate事件的日志
 				c.cfg.Logger.Info("received fake rotate event", slog.String("nextLogName", string(e.NextLogName)))
 
+				// 如果日志名发生变化
 				if fakeRotateLogName != c.master.Position().Name {
+					// 记录日志名变化的日志
 					c.cfg.Logger.Info("log name changed, the fake rotate event will be handled as a real rotate event")
 				} else {
+					// 否则继续下一个事件
 					continue
 				}
 			}
 		}
 
+		// 处理当前事件
 		err = c.handleEvent(ev)
 		if err != nil {
+			// 如果处理失败返回错误
 			return err
 		}
 	}
 }
 
+// handleEvent 处理binlog事件
 func (c *Canal) handleEvent(ev *replication.BinlogEvent) error {
+	// 是否需要保存位置
 	savePos := false
+	// 是否强制保存
 	force := false
+	// 获取当前主库位置
 	pos := c.master.Position()
 	var err error
 
+	// 记录当前事件位置
 	curPos := pos.Pos
 
 	// next binlog pos
+	// 更新位置到当前事件结束位置
 	pos.Pos = ev.Header.LogPos
 
 	// We only save position with RotateEvent and XIDEvent.
 	// For RowsEvent, we can't save the position until meeting XIDEvent
 	// which tells the whole transaction is over.
 	// TODO: If we meet any DDL query, we must save too.
+	// 根据不同类型的事件进行处理
 	switch e := ev.Event.(type) {
 	case *replication.RotateEvent:
+		// 更新binlog文件名和位置
 		pos.Name = string(e.NextLogName)
 		pos.Pos = uint32(e.Position)
+		// 记录日志
 		c.cfg.Logger.Info("rotate binlog", slog.Any("pos", pos))
+		// 需要保存位置
 		savePos = true
 		force = true
+		// 调用事件处理器的OnRotate方法
 		if err = c.eventHandler.OnRotate(ev.Header, e); err != nil {
 			return errors.Trace(err)
 		}
 	case *replication.RowsEvent:
 		// we only focus row based event
+		// 处理行变更事件
 		if err := c.handleRowsEvent(ev); err != nil {
 			c.cfg.Logger.Error("handle rows event", slog.String("file", pos.Name), slog.Uint64("position", uint64(curPos)), slog.Any("error", err))
 			return errors.Trace(err)
@@ -109,6 +150,7 @@ func (c *Canal) handleEvent(ev *replication.BinlogEvent) error {
 		return nil
 	case *replication.TransactionPayloadEvent:
 		// handle subevent row by row
+		// 处理事务负载事件中的每个子事件
 		ev := ev.Event.(*replication.TransactionPayloadEvent)
 		for _, subEvent := range ev.Events {
 			err = c.handleEvent(subEvent)
@@ -119,43 +161,54 @@ func (c *Canal) handleEvent(ev *replication.BinlogEvent) error {
 		}
 		return nil
 	case *replication.XIDEvent:
+		// 需要保存位置
 		savePos = true
 		// try to save the position later
+		// 调用事件处理器的OnXID方法
 		if err := c.eventHandler.OnXID(ev.Header, pos); err != nil {
 			return errors.Trace(err)
 		}
+		// 更新GTID集合
 		if e.GSet != nil {
 			c.master.UpdateGTIDSet(e.GSet)
 		}
 	case *replication.MariadbGTIDEvent:
+		// 处理MariaDB GTID事件
 		if err := c.eventHandler.OnGTID(ev.Header, e); err != nil {
 			return errors.Trace(err)
 		}
 	case *replication.GTIDEvent:
+		// 处理MySQL GTID事件
 		if err := c.eventHandler.OnGTID(ev.Header, e); err != nil {
 			return errors.Trace(err)
 		}
 	case *replication.RowsQueryEvent:
+		// 处理RowsQuery事件
 		if err := c.eventHandler.OnRowsQueryEvent(e); err != nil {
 			return errors.Trace(err)
 		}
 	case *replication.QueryEvent:
+		// 解析SQL语句
 		stmts, _, err := c.parser.Parse(string(e.Query), "", "")
 		if err != nil {
 			// The parser does not understand all syntax.
 			// For example, it won't parse [CREATE|DROP] TRIGGER statements.
+			// 记录解析错误日志
 			c.cfg.Logger.Error("error parsing query, will skip this event", slog.String("query", string(e.Query)), slog.Any("error", err))
 			return nil
 		}
+		// 如果有解析出的语句，需要保存位置
 		if len(stmts) > 0 {
 			savePos = true
 		}
+		// 处理每个解析出的语句
 		for _, stmt := range stmts {
 			nodes := parseStmt(stmt)
 			for _, node := range nodes {
 				if node.db == "" {
 					node.db = string(e.Schema)
 				}
+				// 更新表结构信息
 				if err = c.updateTable(ev.Header, node.db, node.table); err != nil {
 					return errors.Trace(err)
 				}
@@ -163,11 +216,13 @@ func (c *Canal) handleEvent(ev *replication.BinlogEvent) error {
 			if len(nodes) > 0 {
 				force = true
 				// Now we only handle Table Changed DDL, maybe we will support more later.
+				// 调用事件处理器的OnDDL方法
 				if err = c.eventHandler.OnDDL(ev.Header, pos, e); err != nil {
 					return errors.Trace(err)
 				}
 			}
 		}
+		// 如果有GTID集合，更新GTID
 		if savePos && e.GSet != nil {
 			c.master.UpdateGTIDSet(e.GSet)
 		}
@@ -175,10 +230,14 @@ func (c *Canal) handleEvent(ev *replication.BinlogEvent) error {
 		return nil
 	}
 
+	// 如果需要保存位置
 	if savePos {
+		// 更新主库位置
 		c.master.Update(pos)
+		// 更新时间戳
 		c.master.UpdateTimestamp(ev.Header.Timestamp)
 
+		// 调用事件处理器的OnPosSynced方法
 		if err := c.eventHandler.OnPosSynced(ev.Header, pos, c.master.GTIDSet(), force); err != nil {
 			return errors.Trace(err)
 		}

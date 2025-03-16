@@ -95,17 +95,21 @@ func NewTLSConnWithTimeout(conn net.Conn, readTimeout, writeTimeout time.Duratio
 	return c
 }
 
+// ReadPacket 读取一个MySQL协议包
 func (c *Conn) ReadPacket() ([]byte, error) {
 	return c.ReadPacketReuseMem(nil)
 }
 
+// ReadPacketReuseMem 读取一个MySQL协议包并复用内存
 func (c *Conn) ReadPacketReuseMem(dst []byte) ([]byte, error) {
 	// Here we use `sync.Pool` to avoid allocate/destroy buffers frequently.
+	// 这里我们使用`sync.Pool`来避免频繁分配/销毁缓冲区
 	buf := utils.BytesBufferGet()
 	defer func() {
 		utils.BytesBufferPut(buf)
 	}()
 
+	// 如果启用了压缩
 	if c.Compression != mysql.MYSQL_COMPRESS_NONE {
 		// it's possible that we're using compression but the server response with a compressed
 		// packet with uncompressed length of 0. In this case we leave compressedReader nil. The
@@ -113,6 +117,10 @@ func (c *Conn) ReadPacketReuseMem(dst []byte) ([]byte, error) {
 		// for the compressedReader to be reset after a packet write. Without this flag, when a
 		// compressed packet with uncompressed length of 0 is read, the compressedReader would
 		// be nil, and we'd incorrectly attempt to read the next packet as compressed.
+		// 有可能我们使用了压缩但服务器返回了一个解压长度为0的压缩包。在这种情况下我们保持compressedReader为nil。
+		// compressedReaderActive标志对于跟踪读取器的状态很重要，允许在数据包写入后重置compressedReader。
+		// 如果没有这个标志，当读取到一个解压长度为0的压缩包时，compressedReader将为nil，
+		// 我们会错误地尝试将下一个数据包作为压缩数据包读取。
 		if !c.compressedReaderActive {
 			var err error
 			c.compressedReader, err = c.newCompressedPacketReader()
@@ -123,21 +131,27 @@ func (c *Conn) ReadPacketReuseMem(dst []byte) ([]byte, error) {
 		}
 	}
 
+	// 将数据包读取到缓冲区
 	if err := c.ReadPacketTo(buf); err != nil {
 		return nil, errors.Trace(err)
 	}
 
+	// 获取读取的字节和大小
 	readBytes := buf.Bytes()
 	readSize := len(readBytes)
 	var result []byte
+
+	// 如果提供了目标缓冲区
 	if len(dst) > 0 {
 		result = append(dst, readBytes...)
+		// 如果读取的块太大，不再缓存缓冲区
 		// if read block is big, do not cache buf anymore
 		if readSize > utils.TooBigBlockSize {
 			buf = nil
 		}
 	} else {
 		if readSize > utils.TooBigBlockSize {
+			// 如果读取的块太大，直接使用读取的块作为结果并不再缓存缓冲区
 			// if read block is big, use read block as result and do not cache buf anymore
 			result = readBytes
 			buf = nil
@@ -289,16 +303,22 @@ func (c *Conn) ReadPacketTo(w io.Writer) error {
 }
 
 // WritePacket data already has 4 bytes header will modify data in-place
+// WritePacket 方法用于写入数据包，数据已经包含4字节头部，会就地修改数据
 func (c *Conn) WritePacket(data []byte) error {
+	// 计算实际数据长度（减去4字节头部）
 	length := len(data) - 4
 
+	// 处理大于最大负载长度的数据包（分片发送）
 	for length >= mysql.MaxPayloadLen {
+		// 设置分片数据包头部
 		data[0] = 0xff
 		data[1] = 0xff
 		data[2] = 0xff
 
+		// 设置序列号
 		data[3] = c.Sequence
 
+		// 写入分片数据包
 		if n, err := c.writeWithTimeout(data[:4+mysql.MaxPayloadLen]); err != nil {
 			return errors.Wrapf(mysql.ErrBadConn,
 				"Write(payload portion) failed. err %v", err)
@@ -306,31 +326,37 @@ func (c *Conn) WritePacket(data []byte) error {
 			return errors.Wrapf(mysql.ErrBadConn,
 				"Write(payload portion) failed. only %v bytes written, while %v expected", n, 4+mysql.MaxPayloadLen)
 		} else {
+			// 成功写入后递增序列号并更新剩余数据
 			c.Sequence++
 			length -= mysql.MaxPayloadLen
 			data = data[mysql.MaxPayloadLen:]
 		}
 	}
 
+	// 设置最后一个数据包的头部信息
 	data[0] = byte(length)
 	data[1] = byte(length >> 8)
 	data[2] = byte(length >> 16)
 	data[3] = c.Sequence
 
+	// 根据压缩设置选择不同的写入方式
 	switch c.Compression {
 	case mysql.MYSQL_COMPRESS_NONE:
+		// 无压缩模式直接写入
 		if n, err := c.writeWithTimeout(data); err != nil {
 			return errors.Wrapf(mysql.ErrBadConn, "Write failed. err %v", err)
 		} else if n != len(data) {
 			return errors.Wrapf(mysql.ErrBadConn, "Write failed. only %v bytes written, while %v expected", n, len(data))
 		}
 	case mysql.MYSQL_COMPRESS_ZLIB, mysql.MYSQL_COMPRESS_ZSTD:
+		// 压缩模式写入
 		if n, err := c.writeCompressed(data); err != nil {
 			return errors.Wrapf(mysql.ErrBadConn, "Write failed. err %v", err)
 		} else if n != len(data) {
 			return errors.Wrapf(mysql.ErrBadConn, "Write failed. only %v bytes written, while %v expected", n, len(data))
 		}
 
+		// 重置压缩读取器状态
 		c.compressedReaderActive = false
 		if c.compressedReader != nil {
 			if _, ok := c.compressedReader.(io.ReadCloser); ok {
@@ -342,17 +368,22 @@ func (c *Conn) WritePacket(data []byte) error {
 		return errors.Wrapf(mysql.ErrBadConn, "Write failed. Unsuppored compression algorithm set")
 	}
 
+	// 递增序列号并返回
 	c.Sequence++
 	return nil
 }
 
+// writeWithTimeout 带超时的写入方法
 func (c *Conn) writeWithTimeout(b []byte) (n int, err error) {
+	// 如果设置了写超时
 	if c.writeTimeout != 0 {
+		// 设置写操作的截止时间
 		if err := c.SetWriteDeadline(utils.Now().Add(c.writeTimeout)); err != nil {
 			return n, err
 		}
 	}
 
+	// 执行实际的写操作
 	return c.Write(b)
 }
 

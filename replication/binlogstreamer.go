@@ -86,15 +86,20 @@ func NewBinlogStreamer() *BinlogStreamer {
 }
 
 func NewBinlogStreamerWithChanSize(chanSize int) *BinlogStreamer {
+	// 创建一个新的BinlogStreamer实例
 	s := new(BinlogStreamer)
 
+	// 如果传入的chanSize小于等于0，则使用默认值10240
 	if chanSize <= 0 {
 		chanSize = 10240
 	}
 
+	// 初始化事件通道，使用指定的缓冲区大小
 	s.ch = make(chan *BinlogEvent, chanSize)
+	// 初始化错误通道，缓冲区大小为4
 	s.ech = make(chan error, 4)
 
+	// 返回创建的BinlogStreamer实例
 	return s
 }
 
